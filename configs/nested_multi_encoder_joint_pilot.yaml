@@ -1,0 +1,87 @@
+study:
+  name: nested-multi-encoder-joint-gain-safe-pilot-v1
+  # Strong, weak, and medium subjects; revise only after this locked pilot.
+  subjects: [1, 2, 4]
+  class_counts: [4, 16]
+  class_selection:
+    strategy: fixed_spacing_harmonic_aware
+    available_hz: [8, 60]
+    interference_harmonics: [2, 3]
+    start_hz: 17
+    spacing_hz_by_class_count: {4: 4, 16: 2}
+  condition: 2
+  decision_endpoints_seconds: [0.2, 0.3, 0.4, 0.5]
+  # Latency/ITR claims use causal processing. Offline is retained as a single
+  # zero-phase 500 ms benchmark instead of multiplying every latency cell.
+  decision_endpoints_seconds_by_filter_mode:
+    causal: [0.2, 0.3, 0.4, 0.5]
+    offline: [0.5]
+  filter_modes: [offline, causal]
+  onset_latency_seconds: 0.14
+  practical_overhead_seconds: 1.0
+  output: outputs/experiments/nested_multi_encoder_joint_gain_safe_pilot_v1
+
+fusion:
+  # Expanded beyond the confirmatory upper boundary; pilot only.
+  l2_grid: [0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000]
+  candidate_selection_l2: 1.0
+
+advanced_optimization:
+  screened_per_encoder: 8
+  beam_width: 12
+  racing:
+    enabled: true
+    stages: [4, 8]
+    confidence_z: 1.0
+    minimum_survivors: 8
+    seed: 20260719
+  objective:
+    # Accuracy is primary. Margin and log loss break one-SE ties before these costs.
+    spike_cost_weight: 0.00001
+    latency_weight: 0.02
+  subject_pooling:
+    # 0 = individual inner optimum; 1 = population reference. Pilot a mild prior.
+    strength: 0.25
+  reference_parameters:
+    resonate_fire: {alpha: 0.025, drive_threshold_ratio: 2.34375}
+    delta: {threshold_uV: 0.1, asymmetry: 1.0}
+    lif: {threshold_uV: 0.5, tau_seconds: 0.02}
+  retrained_ablation_encoders: [resonate_fire, delta, lif]
+  retrained_ablation_branches: [O1, Oz, O2, O1-Oz, O2-Oz]
+
+bandpass:
+  order: 5
+  half_width_hz: 1.0
+
+resonate_fire:
+  # Search interpretable approximate bandwidths; converted to normalized alpha
+  # at the center of each class set.
+  bandwidth_hz: [0.05, 0.1, 0.2, 0.5, 1.0]
+  damping_alpha: []
+  threshold: [0.00025, 0.001, 0.004, 0.016, 0.064, 0.256, 1.024]
+  operating_rms: [0.75]
+  input_gain: 0.05
+  normalize_input_by_resonance: false
+  harmonics: [1]
+  spread_hz: [-0.5, 0.0, 0.5]
+  event_features: [rate, ttfs, phase_cos, phase_sin]
+  integration_substeps: 4
+  refractory_cycles: 0.5
+  transient_seconds: 0.1
+  gain:
+    # One robust gain per branch is fitted from outer-training trials only.
+    mode: training_branch
+    target_rms: 0.75
+    statistic: median
+    # Used only by the causal_running ablation.
+    tau_seconds: 0.5
+    maximum_gain: 20.0
+
+delta:
+  threshold_uV: [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64]
+  asymmetry: [0.5, 0.75, 1.0, 1.3333333333, 2.0]
+
+lif:
+  threshold_uV: [0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0]
+  tau_seconds: [0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+  input_gain: 1.0

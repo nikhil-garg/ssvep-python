@@ -1,0 +1,121 @@
+study:
+  name: nested-multi-encoder-4c16c-confirmatory-v2
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+  class_counts: [4, 16]
+  class_selection:
+    strategy: fixed_spacing_harmonic_aware
+    available_hz: [8, 60]
+    interference_harmonics: [2, 3]
+    start_hz: 17
+    spacing_hz_by_class_count:
+      4: 4
+      16: 2
+    factorial_audit:
+      # Predeclared alternative sets for separating class count, spacing,
+      # frequency span, and harmonic collisions in later ablations.
+      spacings_hz: [2, 4]
+      starts_hz: [13, 17, 21]
+      maximum_collisions: 0
+  condition: 2
+  decision_seconds: 0.5
+  onset_latency_seconds: 0.14
+  practical_overhead_seconds: 1.0
+  filter_modes: [offline, causal]
+  output: outputs/experiments/nested_multi_encoder_4c16c_confirmatory_v2
+  registry: outputs/registry/experiments.sqlite3
+
+fusion:
+  # Log coverage is deliberately wider than the legacy grid. The one-SE rule
+  # selects the strongest statistically equivalent model rather than whichever
+  # value happens to win by one validation trial.
+  l2_grid: [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]
+  candidate_selection_l2: 1.0
+
+optimization:
+  # Candidate and ridge choices use inner blocks only. The one-standard-error
+  # rule reduces winner's-curse bias from a wider candidate pool.
+  candidate_selection_rule: one_standard_error
+  l2_selection_rule: one_standard_error
+  boundary_action: report_and_expand_next_pilot
+  boundary_review:
+    # Never expand during the confirmatory outer-test run. Revise the next
+    # locked pilot only when the same edge is selected in at least 25% of inner
+    # selections and the adjacent validation values do not already decline.
+    minimum_selection_fraction: 0.25
+    logarithmic_expansion_factor: 4.0
+  multi_fidelity:
+    enabled: true
+    # Each outer fold has eleven inner blocks. Evaluate all candidates on four,
+    # retain half, evaluate survivors through eight, retain half again, then
+    # evaluate the finalists on every inner block. Fold order is deterministic.
+    folds: [4, 8]
+    retain_fractions: [0.5, 0.5]
+    seed: 20260719
+  # Used only to choose among candidates within one SE of the best inner mean.
+  # These are declared before evaluation and are not estimated from outer data.
+  reference_parameters:
+    resonate_fire:
+      alpha: 0.025
+      drive_threshold_ratio: 2.34375
+    delta:
+      threshold_uV: 0.1
+      asymmetry: 1.0
+    lif:
+      threshold_uV: 0.5
+      tau_seconds: 0.02
+
+robustness:
+  rotating_branch_dropout: true
+  feature_count_noise_std_fraction: 0.10
+
+ablations:
+  enabled: true
+  # Evaluated from each already-fitted outer-fold model, so these do not rerun
+  # parameter selection. They measure test-time dependence, not retrained value.
+  branches: [O1, Oz, O2, O1-Oz, O2-Oz]
+  encoders: [rf, delta, lif]
+
+storage:
+  # Temporary uncompressed feature caches make interrupted runs resumable and
+  # are removed after all requested filter modes complete.
+  keep_feature_cache: false
+  # Final checkpoints retain predictions, scores, fold choices and distribution
+  # quantiles, but omit the larger trial-by-feature matrix.
+  save_trial_features: false
+
+bandpass:
+  order: 5
+  half_width_hz: 1.0
+
+resonate_fire:
+  # Low-alpha coverage is extended 10x below the old lower boundary. Values
+  # below 5e-4 are excluded for a 500 ms decision window because their settling
+  # time is poorly identified by the available observation interval.
+  damping_alpha: [0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4]
+  # Operating RMS and threshold are scale-degenerate in a linear oscillator.
+  # Fixing operating RMS removes that redundant axis; the searched quantity is
+  # effectively input_gain * operating_rms / threshold (0.0366 to 150 here).
+  threshold: [0.00025, 0.001, 0.004, 0.016, 0.064, 0.256, 1.024]
+  operating_rms: [0.75]
+  input_gain: 0.05
+  normalize_input_by_resonance: false
+  # Fundamental neurons only. Cross-target response patterns (including an
+  # 8 Hz trial exciting the 16 Hz neuron) stay separate for learned fusion.
+  harmonics: [1]
+  spread_hz: [-0.5, 0.0, 0.5]
+  # Rate, first-spike latency, and circular phase remain separate named fusion
+  # features; the linear model determines whether timing adds held-out value.
+  event_features: [rate, ttfs, phase_cos, phase_sin]
+  integration_substeps: 4
+  refractory_cycles: 0.5
+
+delta:
+  # Absolute µV bounds preserve genuine trial/channel amplitude differences.
+  threshold_uV: [0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56]
+  asymmetry: [0.5, 0.75, 1.0, 1.3333333333, 2.0]
+
+lif:
+  # Gain remains fixed because gain/threshold are non-identifiable together.
+  threshold_uV: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+  tau_seconds: [0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
+  input_gain: 1.0

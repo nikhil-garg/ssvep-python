@@ -1,0 +1,25 @@
+dataset:
+  root: "../.."
+  subject_pattern: "data_s{subject}_64.mat"
+  subjects: [1]
+  conditions: [1]
+  frequencies: [8]
+  channels: posterior_9
+
+preprocessing:
+  downsampling:
+    enabled: true
+    original_rate_hz: 1000
+    target_rate_hz: 250
+    method: matlab_compatible
+  latency:
+    enabled: false
+    seconds: 0.14
+
+execution:
+  overwrite: false
+  resume: true
+
+output:
+  root: outputs
+  format: hdf5
