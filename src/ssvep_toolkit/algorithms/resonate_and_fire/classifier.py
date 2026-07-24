@@ -62,11 +62,23 @@ class OscillatorBankClassifier:
 
     def scores(self, signals: Any, duration_samples: Sequence[int]) -> Any:
         import numpy as np
-        spikes = simulate_bank(self.transform(signals), self.neuron_frequencies_hz, self.sampling_rate_hz, self.parameters, duration_samples)
-        shape = spikes.shape[:-1] + (len(self.frequencies_hz), len(self.harmonics), len(self.spread_hz))
-        grouped = spikes.reshape(shape).mean(axis=-1)
+        grouped = self.neuron_scores(signals, duration_samples).mean(axis=-1)
         weights = np.asarray(self.harmonic_weights, dtype=float)
         return np.sum(grouped * weights, axis=-1) / weights.sum()
+
+    def neuron_scores(self, signals: Any, duration_samples: Sequence[int]) -> Any:
+        """Return unpooled counts as ``duration, trial, target, harmonic, neuron``.
+
+        Keeping the spread-neuron axis lets downstream experiments compare a
+        single resonator with a local oscillator bank without discarding the
+        response pattern through premature averaging.
+        """
+        spikes = simulate_bank(
+            self.transform(signals), self.neuron_frequencies_hz,
+            self.sampling_rate_hz, self.parameters, duration_samples,
+        )
+        shape = spikes.shape[:-1] + (len(self.frequencies_hz), len(self.harmonics), len(self.spread_hz))
+        return spikes.reshape(shape)
 
     def decision_scores(self, signals: Any, duration_samples: Sequence[int]) -> Any:
         """Return spike rates calibrated against training-fold non-target responses."""

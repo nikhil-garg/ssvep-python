@@ -15,7 +15,7 @@ def test_dashboard_contains_registry_run(tmp_path):
     registry.set_status(run, "complete")
     output = render_dashboard(database, tmp_path / "dashboard.html")
     text = output.read_text(encoding="utf-8")
-    assert "SSVEP evidence dashboard" in text
+    assert "SSVEP Experiment Dashboard" in text
     assert "subject-01-fold-09" in text
     assert "outer_test" in text
 
@@ -36,7 +36,7 @@ def test_dashboard_indexes_neuron_example_metadata(tmp_path):
     }), encoding="utf-8")
     output = render_dashboard(database, tmp_path / "dashboard.html", example_directory=examples)
     text = output.read_text(encoding="utf-8")
-    assert "Signal, internal state, and spike evidence" in text
+    assert "Signal, internal state, and spikes" in text
     assert "example.png" in text
 
 
@@ -55,7 +55,7 @@ def test_dashboard_embeds_unit_aware_trace_preview_and_validation_warning(tmp_pa
     output = render_dashboard(database, tmp_path / "dashboard" / "index.html", example_directory=examples)
     text = output.read_text(encoding="utf-8")
     assert "Raw EEG" in text and "µV" in text
-    assert "Nested outer test (primary)" in text
+    assert "Nested outer test" in text
     assert "apparent_same_data" in text
     assert "rf_spikes_ms" in text
     assert "../examples/trace.png" in text
@@ -74,7 +74,7 @@ def test_dashboard_contains_all_metric_overview_and_paginated_runs(tmp_path):
     text = output.read_text(encoding="utf-8")
     assert "All selected metrics at a glance" in text
     assert "Practical ITR" in text
-    assert "Inner validation (optimization diagnostics)" in text
+    assert "Inner validation" in text
     assert "Boundary selection rate · resonate fire · alpha" in text
     assert "Page ${page+1}/${pages}" in text
 

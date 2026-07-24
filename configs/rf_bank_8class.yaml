@@ -1,0 +1,36 @@
+# R&F oscillator-bank comparison. One, two, four, and eight local
+# resonators are centred symmetrically on each target frequency.
+study:
+  name: rf_bank_8class
+  subjects: [1, 2, 3, 4, 5]
+  class_count: 8
+  class_start_hz: 8
+  class_spacing_hz: 4
+  duration_seconds: 1.0
+  channels: [O1, Oz, O2]
+  outer_unit: stimulus_block
+  evaluation: within_subject_leave_one_block_out_parameter_selection
+
+optimization:
+  algorithm: random
+  random_candidates: 160
+  seed: 20260724
+
+resonate_fire:
+  enabled: true
+  alpha: {min: 0.004, max: 0.40, count: 9, spacing: log}
+  threshold: {min: 0.0001, max: 0.25, count: 9, spacing: log}
+  input_gain: {min: 0.003, max: 0.50, count: 9, spacing: log}
+  bank_neurons: [1, 2, 4, 8]
+  spread_half_width_hz: [0.25, 0.5, 1.0, 2.0]
+  harmonics: [1]
+  integration_substeps: 4
+  refractory_cycles: 0.5
+  transient_seconds: 0.1
+  normalize_input_by_resonance: false
+
+lif:
+  enabled: false
+
+output:
+  root: outputs/experiments/rf_bank_8class

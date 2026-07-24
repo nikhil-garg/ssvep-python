@@ -26,17 +26,34 @@ def reference_signals(
 
 
 def canonical_correlations(x: Any, y: Any, regularization: float = 1e-10) -> Any:
-    """Canonical correlations for variables-by-samples arrays."""
+    """Return CCA correlations for ``(variable, sample)`` inputs.
+
+    ``regularization`` is a non-negative ridge value applied to both
+    covariance matrices before whitening; it makes rank-deficient inputs
+    well-defined without changing the unregularized API.
+    """
     import numpy as np
-    from scipy.linalg import qr
+    from scipy.linalg import eigh
 
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     if x.ndim != 2 or y.ndim != 2 or x.shape[1] != y.shape[1]:
         raise ValueError("x and y must be variables-by-samples with equal samples")
+    if not np.isfinite(x).all() or not np.isfinite(y).all():
+        raise ValueError("x and y must contain only finite values")
+    if regularization < 0:
+        raise ValueError("regularization must be non-negative")
     x = x - x.mean(axis=1, keepdims=True)
     y = y - y.mean(axis=1, keepdims=True)
-    qx, _ = qr(x.T, mode="economic")
-    qy, _ = qr(y.T, mode="economic")
-    values = np.linalg.svd(qx.T @ qy, compute_uv=False)
+    scale = max(x.shape[1] - 1, 1)
+    cxx = x @ x.T / scale + regularization * np.eye(x.shape[0])
+    cyy = y @ y.T / scale + regularization * np.eye(y.shape[0])
+    cxy = x @ y.T / scale
+    x_values, x_vectors = eigh(cxx)
+    y_values, y_vectors = eigh(cyy)
+    if np.any(x_values <= 0) or np.any(y_values <= 0):
+        raise ValueError("regularization must make covariance matrices positive definite")
+    inv_root_x = (x_vectors / np.sqrt(x_values)) @ x_vectors.T
+    inv_root_y = (y_vectors / np.sqrt(y_values)) @ y_vectors.T
+    values = np.linalg.svd(inv_root_x @ cxy @ inv_root_y, compute_uv=False)
     return np.clip(np.real(values), 0, 1)

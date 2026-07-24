@@ -91,6 +91,12 @@ def _parser() -> argparse.ArgumentParser:
                     help="internal Euler steps per 1 ms EEG sample")
     rf.add_argument("--refractory-cycles", type=float, default=0.5,
                     help="minimum reset interval measured in each neuron's cycles")
+    study = sub.add_parser("study", help="plan or resume a YAML-defined study")
+    study_sub = study.add_subparsers(dest="study_command", required=True)
+    study_run = study_sub.add_parser("run", help="create or resume a study run directory")
+    study_run.add_argument("--config", type=Path, required=True)
+    study_resume = study_sub.add_parser("resume", help="read an existing study run")
+    study_resume.add_argument("--run-dir", type=Path, required=True)
     registry = sub.add_parser("registry", help="inspect the shared experiment-run registry")
     registry.add_argument("--database", type=Path, default=Path("outputs/registry/experiments.sqlite3"))
     registry_sub = registry.add_subparsers(dest="registry_command", required=True)
@@ -118,6 +124,14 @@ def _parser() -> argparse.ArgumentParser:
     example.add_argument("--duration-ms", type=int, default=1000)
     example.add_argument("--encoders", nargs="+", choices=("resonate_fire", "delta", "lif"),
                          default=("resonate_fire", "delta", "lif"))
+    example.add_argument("--rf-alpha", type=float, default=.025)
+    example.add_argument("--rf-threshold", type=float, default=.01)
+    example.add_argument("--rf-operating-rms", type=float, default=.75)
+    example.add_argument("--lif-threshold-scale", type=float, default=.5)
+    example.add_argument("--lif-tau", type=float, default=.02)
+    example.add_argument("--lif-gain", type=float, default=1.0)
+    example.add_argument("--delta-threshold-scale", type=float, default=1.0)
+    example.add_argument("--delta-asymmetry", type=float, default=1.0)
     sub.add_parser("gui", help="launch the optional PySide desktop workbench")
     return parser
 
@@ -387,6 +401,19 @@ def _dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _study(args: argparse.Namespace) -> int:
+    from ssvep_toolkit.experiments import StudyRunner
+
+    runner = StudyRunner()
+    if args.study_command == "resume":
+        result = runner.resume(args.run_dir)
+    else:
+        definition = runner.load(args.config)
+        result = runner.run(runner.plan(definition), definition)
+    print(json.dumps({"run_dir": str(result.run_dir), "status": result.status, "cells": result.plan.n_cells}))
+    return 0
+
+
 def _example_neuron(args: argparse.Namespace) -> int:
     import matplotlib
     matplotlib.use("Agg")
@@ -398,6 +425,9 @@ def _example_neuron(args: argparse.Namespace) -> int:
             subject=args.subject, condition=args.condition, frequency_hz=args.frequency,
             block=args.block, electrode=args.electrode, start_ms=args.start_ms,
             duration_ms=args.duration_ms,
+            rf_alpha=args.rf_alpha, rf_threshold=args.rf_threshold, rf_operating_rms=args.rf_operating_rms,
+            lif_threshold_scale=args.lif_threshold_scale, lif_tau_seconds=args.lif_tau, lif_input_gain=args.lif_gain,
+            delta_threshold_scale=args.delta_threshold_scale, delta_asymmetry=args.delta_asymmetry,
         ),
         args.output, encoders=args.encoders,
     )
@@ -420,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
             return _encode_spikes(args)
         if args.command == "experiment":
             return _experiment(args)
+        if args.command == "study":
+            return _study(args)
         if args.command == "registry":
             return _registry(args)
         if args.command == "dashboard":

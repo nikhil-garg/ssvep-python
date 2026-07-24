@@ -1,0 +1,13 @@
+schema_version: 1
+study:
+  name: smoke
+  validation_level: inner_validation
+dataset:
+  subjects: [1]
+task:
+  class_count: 4
+  n_blocks: 3
+optimization:
+  n_candidates: 1
+output:
+  root: outputs/experiments

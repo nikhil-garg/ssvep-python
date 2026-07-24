@@ -1,4 +1,4 @@
-"""PySide workbench over the shared CLI, example renderer, and registry."""
+"""PySide interface for running and reviewing SSVEP analyses."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -49,7 +49,7 @@ def launch_gui() -> int:
     class Window(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("SSVEP spike encoding workbench")
+            self.setWindowTitle("SSVEP Spike Encoding Analysis")
             icon = QIcon(str(Path(__file__).with_name("assets") / "app_icon.svg"))
             self.setWindowIcon(icon)
             self.resize(1180, 780)
@@ -57,15 +57,18 @@ def launch_gui() -> int:
             self.current_run_log_path = None
             self.example_process = QProcess(self); self.example_pending = False
             self.dashboard_process = QProcess(self); self.dashboard_open_after = False
+            self.single_process = QProcess(self)
             self.thread_pool = QThreadPool.globalInstance(); self.background_workers = []
             self.run_output_buffer = ""; self.refresh_active = False; self.cleanup_active = False
             self.tabs = QTabWidget(); self.setCentralWidget(self.tabs)
             self._build_explorer_tab()
             self._build_run_tab()
+            self._build_single_encoder_tab()
             self._build_dashboard_tab()
             self.process.errorOccurred.connect(self.experiment_process_error)
             self.example_process.errorOccurred.connect(self.example_process_error)
             self.dashboard_process.errorOccurred.connect(self.dashboard_process_error)
+            self.single_process.finished.connect(self.single_encoder_finished)
 
         def _folder_row(self, field: QLineEdit) -> QWidget:
             widget = QWidget(); row = QHBoxLayout(widget); row.setContentsMargins(0, 0, 0, 0)
@@ -126,6 +129,14 @@ def launch_gui() -> int:
             self.example_encoder = QComboBox(); self.example_encoder.addItems(("All encoders", "Resonate-and-fire", "Delta", "LIF"))
             self.example_auto = QCheckBox("Update automatically when the selection changes")
             self.example_auto.setChecked(True)
+            self.example_rf_alpha = self._double(.0001, 2.0, .025, 4, .005)
+            self.example_rf_threshold = self._double(.00001, 5.0, .01, 5, .005)
+            self.example_rf_rms = self._double(.01, 10.0, .75, 3, .05)
+            self.example_lif_scale = self._double(.01, 5.0, .5, 3, .05)
+            self.example_lif_tau = self._double(.001, 1.0, .02, 4, .005)
+            self.example_lif_gain = self._double(.01, 10.0, 1.0, 3, .1)
+            self.example_delta_scale = self._double(.01, 10.0, 1.0, 3, .1)
+            self.example_delta_asymmetry = self._double(.05, 10.0, 1.0, 3, .1)
             form.addRow("Dataset folder", self._folder_row(self.example_data))
             form.addRow("Example output folder", self._folder_row(self.example_output))
             selectors = QWidget(); selector_row = QHBoxLayout(selectors); selector_row.setContentsMargins(0, 0, 0, 0)
@@ -135,6 +146,10 @@ def launch_gui() -> int:
                 selector_row.addWidget(QLabel(label)); selector_row.addWidget(control)
             form.addRow("Selection", selectors); layout.addLayout(form)
             form.addRow("Preview", self.example_auto)
+            parameter_row = QWidget(); parameter_layout = QHBoxLayout(parameter_row); parameter_layout.setContentsMargins(0, 0, 0, 0)
+            for label, control in (("R&F alpha", self.example_rf_alpha), ("R&F threshold", self.example_rf_threshold), ("R&F RMS", self.example_rf_rms), ("LIF threshold scale", self.example_lif_scale), ("LIF tau", self.example_lif_tau), ("LIF gain", self.example_lif_gain), ("Delta scale", self.example_delta_scale), ("Delta asymmetry", self.example_delta_asymmetry)):
+                parameter_layout.addWidget(QLabel(label)); parameter_layout.addWidget(control)
+            parameter_layout.addStretch(); form.addRow("Encoder parameters", parameter_row)
             self.example_generate_button = QPushButton("Generate signal/state/spike figure")
             self.example_generate_button.clicked.connect(self.generate_example)
             self.example_generate_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
@@ -178,6 +193,10 @@ def launch_gui() -> int:
                 arguments = ["-m", "ssvep_toolkit.cli", "example-neuron", "--data-dir", self.example_data.text(),
                              "--output", str(self.example_output_path), "--subject", str(subject),
                              "--frequency", str(frequency), "--block", str(block), "--electrode", electrode,
+                             "--rf-alpha", str(self.example_rf_alpha.value()), "--rf-threshold", str(self.example_rf_threshold.value()),
+                             "--rf-operating-rms", str(self.example_rf_rms.value()), "--lif-threshold-scale", str(self.example_lif_scale.value()),
+                             "--lif-tau", str(self.example_lif_tau.value()), "--lif-gain", str(self.example_lif_gain.value()),
+                             "--delta-threshold-scale", str(self.example_delta_scale.value()), "--delta-asymmetry", str(self.example_delta_asymmetry.value()),
                              "--encoders", *encoder_map[self.example_encoder.currentText()]]
                 self.example_caption.setText("Rendering in the background...")
                 self._progress_busy(self.example_progress, "Loading EEG and rendering full-resolution figure…")
@@ -216,6 +235,102 @@ def launch_gui() -> int:
         def resizeEvent(self, event: object) -> None:
             super().resizeEvent(event)
             QTimer.singleShot(0, self._fit_example_image)
+
+        def _range_field(self, text: str) -> QLineEdit:
+            field = QLineEdit(text)
+            field.setToolTip("min, max, count, spacing — for example: 0.01, 0.16, 5, log")
+            return field
+
+        def _build_single_encoder_tab(self) -> None:
+            """Small, purpose-built panel for auditable 8-class encoder searches."""
+            tab = QWidget(); layout = QVBoxLayout(tab); form = QFormLayout()
+            self.single_subjects = QLineEdit("1,2,3,4,5")
+            self.single_all_subjects = QCheckBox("All 30 subjects")
+            self.single_all_subjects.toggled.connect(lambda checked: self.single_subjects.setEnabled(not checked))
+            self.single_start = self._spin(1, 32, 8); self.single_spacing = self._spin(1, 7, 4)
+            self.single_duration = self._spin(200, 5000, 1000); self.single_duration.setSingleStep(100)
+            self.single_algorithm = QComboBox(); self.single_algorithm.addItem("Full bounded grid", "grid"); self.single_algorithm.addItem("Random bounded sample", "random")
+            self.single_random = self._spin(1, 1000, 48)
+            self.single_rf_alpha = self._range_field("0.01, 0.16, 5, log")
+            self.single_rf_threshold = self._range_field("0.00025, 0.064, 5, log")
+            self.single_rf_gain = self._range_field("0.01, 0.20, 5, log")
+            self.single_rf_bank_neurons = QLineEdit("1,2,4,8")
+            self.single_rf_bank_width = QLineEdit("0.25,0.5,1.0,2.0")
+            self.single_lif_threshold = self._range_field("0.025, 2.0, 6, log")
+            self.single_lif_tau = self._range_field("0.002, 0.10, 6, log")
+            self.single_lif_gain = self._range_field("0.25, 2.0, 4, log")
+            self.single_lif_half_width = self._double(.1, 5.0, 1.0, 2, .1); self.single_lif_order = self._spin(1, 10, 5)
+            subject_row = QWidget(); row = QHBoxLayout(subject_row); row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(self.single_subjects); row.addWidget(self.single_all_subjects); row.addStretch()
+            form.addRow("Subjects (IDs)", subject_row)
+            stim = QWidget(); row = QHBoxLayout(stim); row.setContentsMargins(0, 0, 0, 0)
+            for label, control in (("Start (Hz)", self.single_start), ("Spacing (Hz)", self.single_spacing), ("Decision (ms)", self.single_duration)):
+                row.addWidget(QLabel(label)); row.addWidget(control)
+            row.addStretch(); form.addRow("Eight-class stimulus grid", stim)
+            algo = QWidget(); row = QHBoxLayout(algo); row.setContentsMargins(0, 0, 0, 0); row.addWidget(self.single_algorithm); row.addWidget(QLabel("Random samples")); row.addWidget(self.single_random); row.addStretch(); form.addRow("Optimisation", algo)
+            form.addRow("R&F alpha", self.single_rf_alpha); form.addRow("R&F threshold", self.single_rf_threshold); form.addRow("R&F input gain", self.single_rf_gain)
+            form.addRow("R&F bank neurons", self.single_rf_bank_neurons); form.addRow("R&F bank half-width (Hz)", self.single_rf_bank_width)
+            form.addRow("LIF threshold (µV)", self.single_lif_threshold); form.addRow("LIF tau (s)", self.single_lif_tau); form.addRow("LIF input gain", self.single_lif_gain)
+            lif_filter = QWidget(); row = QHBoxLayout(lif_filter); row.setContentsMargins(0, 0, 0, 0); row.addWidget(QLabel("Half-width (Hz)")); row.addWidget(self.single_lif_half_width); row.addWidget(QLabel("Order")); row.addWidget(self.single_lif_order); row.addStretch(); form.addRow("LIF pre-filter", lif_filter)
+            advanced_fields = (self.single_algorithm, self.single_rf_alpha, self.single_rf_threshold,
+                               self.single_rf_gain, self.single_rf_bank_neurons, self.single_rf_bank_width, self.single_lif_threshold, self.single_lif_tau,
+                               self.single_lif_gain, lif_filter)
+            def show_advanced(visible: bool) -> None:
+                for field in advanced_fields:
+                    field.setVisible(visible)
+                    label = form.labelForField(field)
+                    if label is not None:
+                        label.setVisible(visible)
+            show_advanced(False)
+            layout.addLayout(form)
+            self.single_advanced_toggle = QCheckBox("Show optimisation and encoder bounds")
+            self.single_advanced_toggle.toggled.connect(show_advanced)
+            layout.addWidget(self.single_advanced_toggle)
+            text = QLabel("R&F receives unfiltered EEG. LIF receives one f±bandwidth filter per candidate stimulus frequency. Each candidate is assessed on held-out blocks; the panel saves selected parameters for every block, candidate accuracy surfaces, and subject-level accuracy.")
+            text.setWordWrap(True); layout.addWidget(text)
+            buttons = QHBoxLayout(); self.single_run_button = QPushButton("Run R&F + LIF 8-class study"); self.single_plot_button = QPushButton("Create comparison report"); self.single_stop_button = QPushButton("Stop")
+            self.single_run_button.clicked.connect(self.start_single_encoder_study); self.single_plot_button.clicked.connect(self.plot_single_encoder_study); self.single_stop_button.clicked.connect(self.single_process.terminate); self.single_stop_button.setEnabled(False)
+            buttons.addWidget(self.single_run_button); buttons.addWidget(self.single_plot_button); buttons.addWidget(self.single_stop_button); buttons.addStretch(); layout.addLayout(buttons)
+            self.single_progress = QProgressBar(); self._progress_idle(self.single_progress, "8-class single-encoder study ready"); layout.addWidget(self.single_progress)
+            self.single_status = QLabel("Choose bounded parameter ranges; bounds are inclusive and logarithmic when requested."); self.single_status.setWordWrap(True); layout.addWidget(self.single_status)
+            self.single_log = QTextEdit(); self.single_log.setReadOnly(True); layout.addWidget(self.single_log, 1)
+            self.single_process.readyReadStandardOutput.connect(lambda: self.single_log.append(bytes(self.single_process.readAllStandardOutput()).decode(errors="replace")))
+            self.single_process.readyReadStandardError.connect(lambda: self.single_log.append(bytes(self.single_process.readAllStandardError()).decode(errors="replace")))
+            self.experiment_tabs.addTab(tab, "Single encoders · 8 class")
+
+        @staticmethod
+        def _range_spec(field: QLineEdit) -> dict[str, object]:
+            parts = [part.strip() for part in field.text().split(",")]
+            if len(parts) != 4: raise ValueError("Each bound must be: min, max, count, spacing")
+            return {"min": float(parts[0]), "max": float(parts[1]), "count": int(parts[2]), "spacing": parts[3]}
+
+        def start_single_encoder_study(self) -> None:
+            if self.single_process.state() != QProcess.NotRunning:
+                return
+            try:
+                import yaml
+                subjects = list(range(1, 31)) if self.single_all_subjects.isChecked() else [int(value.strip()) for value in self.single_subjects.text().split(",") if value.strip()]
+                if not subjects or any(value < 1 or value > 30 for value in subjects): raise ValueError("Subjects must be IDs between 1 and 30")
+                config = yaml.safe_load(Path("configs/single_encoder_8class.yaml").read_text(encoding="utf-8"))
+                config["study"].update(subjects=subjects, class_start_hz=self.single_start.value(), class_spacing_hz=self.single_spacing.value(), duration_seconds=self.single_duration.value()/1000)
+                config["optimization"].update(algorithm=self.single_algorithm.currentData(), random_candidates=self.single_random.value())
+                config["resonate_fire"].update(alpha=self._range_spec(self.single_rf_alpha), threshold=self._range_spec(self.single_rf_threshold), input_gain=self._range_spec(self.single_rf_gain), bank_neurons=self._integer_grid(self.single_rf_bank_neurons.text()), spread_half_width_hz=self._number_grid(self.single_rf_bank_width.text()))
+                config["lif"].update(threshold_uV=self._range_spec(self.single_lif_threshold), tau_seconds=self._range_spec(self.single_lif_tau), input_gain=self._range_spec(self.single_lif_gain), bandpass_half_width_hz=self.single_lif_half_width.value(), bandpass_order=self.single_lif_order.value())
+                output = Path("outputs/gui_configs/single_encoder_8class.yaml"); output.parent.mkdir(parents=True, exist_ok=True); output.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+                self.single_log.clear(); self.single_log.append(f"Saved {output}"); self._progress_busy(self.single_progress, "Running block-wise parameter selection…")
+                self.single_run_button.setEnabled(False); self.single_stop_button.setEnabled(True)
+                self.single_process.start(__import__("sys").executable, [str(Path.cwd()/"scripts/run_single_encoder_8class.py"), "--config", str(output)])
+            except Exception as exc: QMessageBox.critical(self, "Single encoder configuration", str(exc))
+
+        def plot_single_encoder_study(self) -> None:
+            if self.single_process.state() != QProcess.NotRunning: return
+            self._progress_busy(self.single_progress, "Rendering 8-class encoder comparison…")
+            self.single_process.start(__import__("sys").executable, [str(Path.cwd()/"scripts/plot_single_encoder_8class.py")])
+
+        def single_encoder_finished(self, code: int, *_: object) -> None:
+            self.single_run_button.setEnabled(True); self.single_stop_button.setEnabled(False)
+            message = "Study/report complete" if code == 0 else "Study/report stopped or failed"
+            self.single_status.setText(message); self._progress_idle(self.single_progress, message)
 
         def _build_run_tab(self) -> None:
             tab = QWidget(); layout = QVBoxLayout(tab); form = QFormLayout()
@@ -331,7 +446,9 @@ def launch_gui() -> int:
             self.process.readyReadStandardOutput.connect(self.read_output); self.process.readyReadStandardError.connect(self.read_error)
             self.process.finished.connect(self.experiment_finished)
             QTimer.singleShot(0, self.refresh_experiment_status)
-            self.tabs.addTab(tab, "Experiments")
+            self.experiment_tabs = QTabWidget()
+            self.experiment_tabs.addTab(tab, "Nested multi-encoder")
+            self.tabs.addTab(self.experiment_tabs, "Experiments")
 
         def start_run(self) -> None:
             if self.process.state() != QProcess.NotRunning:

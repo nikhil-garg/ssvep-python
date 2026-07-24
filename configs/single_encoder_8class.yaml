@@ -1,0 +1,40 @@
+# Interpretable encoder comparison. Each held-out stimulus block is scored
+# with parameters selected on the remaining eleven blocks of the same subject.
+study:
+  name: single_encoder_8class
+  subjects: [1, 2, 3, 4, 5]
+  class_count: 8
+  class_start_hz: 8
+  class_spacing_hz: 4
+  duration_seconds: 1.0
+  channels: [O1, Oz, O2]
+  outer_unit: stimulus_block
+  evaluation: within_subject_leave_one_block_out_parameter_selection
+
+optimization:
+  algorithm: grid        # grid or random
+  random_candidates: 48  # used only for random
+  seed: 20260724
+
+resonate_fire:
+  enabled: true
+  alpha: {min: 0.01, max: 0.16, count: 5, spacing: log}
+  threshold: {min: 0.00025, max: 0.064, count: 5, spacing: log}
+  input_gain: {min: 0.01, max: 0.20, count: 5, spacing: log}
+  harmonics: [1]
+  spread_hz: [0.0]
+  integration_substeps: 4
+  refractory_cycles: 0.5
+  transient_seconds: 0.1
+  normalize_input_by_resonance: false
+
+lif:
+  enabled: true
+  bandpass_half_width_hz: 1.0
+  bandpass_order: 5
+  threshold_uV: {min: 0.025, max: 2.0, count: 6, spacing: log}
+  tau_seconds: {min: 0.002, max: 0.10, count: 6, spacing: log}
+  input_gain: {min: 0.25, max: 2.0, count: 4, spacing: log}
+
+output:
+  root: outputs/experiments/single_encoder_8class

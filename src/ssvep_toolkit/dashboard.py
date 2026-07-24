@@ -46,6 +46,7 @@ def render_dashboard(database: str | Path, output: str | Path, *,
     data = _compact_snapshot(snapshot)
     data["examples"] = _load_examples(example_directory, relative_to=target.parent)
     data["experiment_progress"] = _experiment_progress(experiment_directory)
+    data["encoder_comparison_results"] = _encoder_comparison_results(experiment_directory)
     metric_meta = {
         name: {"label": label, "unit": unit, "scale": scale}
         for name, (label, unit, scale) in METRIC_META.items()
@@ -180,6 +181,14 @@ def _experiment_progress(directory: str | Path | None) -> list[dict[str, object]
         bytes_total = sum(path.stat().st_size for path in files)
         updated = max((path.stat().st_mtime for path in files), default=experiment.stat().st_mtime)
         expected = planned.get(experiment.name)
+        if experiment.name in {"single_encoder_8class", "rf_bank_8class"}:
+            try:
+                plan = json.loads((experiment / "study_plan.json").read_text(encoding="utf-8"))
+                configuration = plan["config"]
+                active_encoders = sum(bool(configuration.get(name, {}).get("enabled", True)) for name in ("resonate_fire", "lif"))
+                expected = len(configuration["study"]["subjects"]) * active_encoders
+            except (OSError, ValueError, KeyError, TypeError):
+                expected = None
         current = latest_progress(experiment / "progress.jsonl")
         advanced_cell_progress = (
             current is not None and current.get("cell_current") is not None and current.get("cell_total")
@@ -199,7 +208,8 @@ def _experiment_progress(directory: str | Path | None) -> list[dict[str, object]
         # the worker PID. A freshly updated running journal is therefore also
         # a reliable local liveness signal; old interrupted journals stay
         # visibly resumable rather than being mislabeled as live.
-        active = bool(
+        encoder_run_active = bool(expected and checkpoints < expected and time.time() - updated < 180.0)
+        active = encoder_run_active or bool(
             current and current.get("status") == "running"
             and (_pid_is_running(pid) or time.time() - updated < 180.0)
         )
@@ -215,11 +225,36 @@ def _experiment_progress(directory: str | Path | None) -> list[dict[str, object]
             "cell_total": current.get("cell_total") if current else None,
             "completed_cells": completed_cells,
             "eta_seconds": current.get("eta_seconds") if current else None,
-            "status": current.get("status") if current else None,
+            "status": current.get("status") if current else ("completed" if expected and checkpoints >= expected else "running" if encoder_run_active else "pending"),
             "active": active,
             "pid": pid,
         })
     return sorted(rows, key=lambda item: item["updated_epoch"], reverse=True)[:20]
+
+
+def _encoder_comparison_results(directory: str | Path | None) -> list[dict[str, object]]:
+    """Summarize subject-wise held-block results from the 8-class studies."""
+    if directory is None:
+        return []
+    import numpy as np
+    rows = []
+    for name in ("single_encoder_8class", "rf_bank_8class"):
+        checkpoint_dir = Path(directory) / name / "checkpoints"
+        for path in sorted(checkpoint_dir.glob("*.npz")) if checkpoint_dir.exists() else ():
+            try:
+                with np.load(path, allow_pickle=False) as payload:
+                    parameters = tuple(str(item) for item in payload["parameter_names"])
+                    selected = np.asarray(payload["selected_parameters_per_block"], dtype=float)
+                    rows.append({
+                        "study": name, "encoder": str(payload["encoder"]), "subject": int(payload["subject_id"]),
+                        "accuracy": round(100 * float(payload["accuracy"]), 2),
+                        "candidates": int(len(payload["parameter_grid"])), "parameters": ", ".join(parameters),
+                        "selected_summary": np.round(np.median(selected, axis=0), 5).tolist(),
+                        "updated_epoch": round(path.stat().st_mtime, 3),
+                    })
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+    return sorted(rows, key=lambda item: (item["study"], item["encoder"], item["subject"]))
 
 
 def _pid_is_running(pid: object) -> bool:
@@ -236,7 +271,7 @@ def _pid_is_running(pid: object) -> bool:
 
 _DASHBOARD_TEMPLATE = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SSVEP evidence dashboard</title>
+<title>SSVEP Experiment Dashboard</title>
 <style>
 :root{--ink:#15202b;--muted:#5e6f80;--line:#d7e0e8;--paper:#fff;--bg:#f3f6f9;--blue:#1769aa;--green:#16856b;--orange:#b56a18;--red:#b63e4a;--soft:#eaf1f7}
 @media(prefers-color-scheme:dark){:root{--ink:#e8eef4;--muted:#aab8c5;--line:#344454;--paper:#16212b;--bg:#0f171f;--blue:#65aee8;--green:#55c2a4;--orange:#e0a253;--red:#e47c86;--soft:#223240}}
@@ -245,22 +280,23 @@ _DASHBOARD_TEMPLATE = r'''<!doctype html>
 .live-progress{display:grid;gap:12px}.live-progress .live-row{padding:12px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--blue) 5%,var(--paper))}.live-progress .live-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}.progress-track{height:11px;border-radius:99px;background:var(--soft);overflow:hidden;margin-top:8px}.progress-fill{height:100%;background:linear-gradient(90deg,var(--blue),var(--green));min-width:2px}.progress-detail{display:flex;gap:14px;flex-wrap:wrap;margin-top:7px;color:var(--muted);font-size:12px}.live-state{color:var(--green);font-weight:650}.pending-state{color:var(--orange);font-weight:650}
 @media(max-width:900px){.grid2,.example-layout{grid-template-columns:1fr}.cards,.facets{grid-template-columns:1fr}.panel{overflow:auto}main,header{padding-left:13px;padding-right:13px}}
 </style></head><body>
-<header><h1>SSVEP evidence dashboard</h1><p>Validation design, accuracy, information-transfer rate, latency, spike cost, robustness, runtime, and neuron-state evidence.</p></header>
+<header><h1>SSVEP Experiment Dashboard</h1><p>Results, parameter optimization, accuracy, information-transfer rate, latency, spike cost, robustness, runtime, and neuron-state plots.</p></header>
 <main>
 <section class="panel"><div class="controls">
 <div class="control"><label for="study">Study</label><select id="study"></select></div>
-<div class="control"><label for="split">Evidence split</label><select id="split"></select></div>
+<div class="control"><label for="split">Evaluation split</label><select id="split"></select></div>
 <div class="control"><label for="subject">Subject</label><select id="subject"></select></div>
 <div class="control"><label for="classes">Classes</label><select id="classes"></select></div>
 <div class="control"><label for="filter">Filter mode</label><select id="filter"></select></div>
 </div><div id="split-warning" class="warning"></div></section>
 <section class="panel" id="live-progress-panel"><h2>Live and pending experiments</h2><div id="live-progress" class="live-progress"></div></section>
+<section class="panel"><h2>8-class encoder comparison</h2><p class="note">Subject-wise accuracy evaluated on held-out stimulus blocks.</p><div id="encoder-results"></div></section>
 <section class="cards" id="cards"></section>
 <section class="panel"><h2>All selected metrics at a glance</h2><div id="metric-facets" class="facets"></div></section>
 <section class="panel"><div class="controls"><div class="control"><label for="metric">Plotted metric</label><select id="metric"></select></div></div><div id="metric-chart" class="chart"></div><div class="legend"><span><i class="swatch" style="background:var(--green)"></i>Causal</span><span><i class="swatch" style="background:var(--blue)"></i>Offline</span><span><i class="swatch" style="background:var(--orange)"></i>Unspecified</span></div></section>
-<div class="grid2"><section class="panel"><h2>All metrics in the selected evidence split</h2><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Unit</th><th>N</th><th>Median</th><th>Minimum</th><th>Maximum</th></tr></thead><tbody id="metric-summary"></tbody></table></div></section>
+<div class="grid2"><section class="panel"><h2>Metrics for the selected evaluation split</h2><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Unit</th><th>N</th><th>Median</th><th>Minimum</th><th>Maximum</th></tr></thead><tbody id="metric-summary"></tbody></table></div></section>
 <section class="panel"><h2>Recent experiment storage and progress</h2><div class="table-wrap"><table><thead><tr><th>Experiment</th><th>Checkpoints</th><th>Current phase</th><th>ETA</th><th>Size</th><th>Updated</th></tr></thead><tbody id="progress"></tbody></table></div></section></div>
-<section class="panel"><h2>Signal, internal state, and spike evidence</h2><div class="controls"><div class="control"><label for="example">Generated segment</label><select id="example"></select></div><div class="control"><label for="trace">Trace</label><select id="trace"></select></div></div><div class="example-layout"><div><div id="trace-chart" class="chart"></div><div id="trace-caption" class="caption"></div></div><div id="example-view"></div></div></section>
+<section class="panel"><h2>Signal, internal state, and spikes</h2><div class="controls"><div class="control"><label for="example">Segment</label><select id="example"></select></div><div class="control"><label for="trace">Trace</label><select id="trace"></select></div></div><div class="example-layout"><div><div id="trace-chart" class="chart"></div><div id="trace-caption" class="caption"></div></div><div id="example-view"></div></div></section>
 <section class="panel"><h2>Runs</h2><div class="controls"><div class="control"><label for="search">Search</label><input id="search" placeholder="Run, encoder, or study"></div></div><div class="table-wrap"><table><thead><tr><th>Study</th><th>Subject</th><th>Classes</th><th>Filter</th><th>Encoder</th><th>Accuracy</th><th>Practical ITR</th><th>Status</th></tr></thead><tbody id="runs"></tbody></table></div><div class="pager"><button id="prev">Previous</button><span id="page"></span><button id="next">Next</button></div></section>
 </main>
 <script id="dashboard-data" type="application/json">__PAYLOAD__</script><script>
@@ -270,18 +306,18 @@ const median=a=>{const b=[...a].sort((x,y)=>x-y),n=b.length;return n?b.length%2?
 const fmt=(v,name)=>{if(!Number.isFinite(v))return '–';const m=meta(name),x=v*m.scale;return `${Math.abs(x)>=100?x.toFixed(1):Math.abs(x)>=10?x.toFixed(2):x.toFixed(3)}${m.unit==='%'?'%':''}`};
 const options=(values,label='All')=>`<option value="">${label}</option>`+[...new Set(values.filter(x=>x!==null&&x!==undefined))].map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');
 q('#study').innerHTML=options(D.studies.map(x=>x.id),'All studies');D.studies.forEach(s=>{const o=[...q('#study').options].find(x=>x.value===String(s.id));if(o)o.textContent=s.name});
-const splitOrder=['outer_test','inner_validation','outer_test_perturbed','apparent_same_data'];q('#split').innerHTML=splitOrder.filter(x=>D.metrics.some(m=>m.split===x)).map(x=>`<option value="${x}">${x==='outer_test'?'Nested outer test (primary)':x==='inner_validation'?'Inner validation (optimization diagnostics)':x==='outer_test_perturbed'?'Perturbed outer test (robustness)':'Apparent same-data (exploratory)'}</option>`).join('');
+const splitOrder=['outer_test','inner_validation','outer_test_perturbed','apparent_same_data'];q('#split').innerHTML=splitOrder.filter(x=>D.metrics.some(m=>m.split===x)).map(x=>`<option value="${x}">${x==='outer_test'?'Nested outer test':x==='inner_validation'?'Inner validation':x==='outer_test_perturbed'?'Perturbed outer test':'Same-data score'}</option>`).join('');
 q('#subject').innerHTML=options(D.runs.map(x=>x.subject),'All subjects');q('#classes').innerHTML=options(D.runs.map(x=>x.classes),'All class counts');q('#filter').innerHTML=options(['causal','offline','unspecified'],'All filter modes');
 let page=0,pageSize=50;
 function baseMatch(x){return(!q('#study').value||String(x.study_id)===q('#study').value)&&(!q('#subject').value||String(x.subject)===q('#subject').value)&&(!q('#classes').value||String(x.classes)===q('#classes').value)&&(!q('#filter').value||x.filter===q('#filter').value)}
 function filteredMetrics(ignoreName=false){const split=q('#split').value,name=q('#metric').value;return D.metrics.filter(m=>m.split===split&&baseMatch(m)&&(ignoreName||m.name===name))}
 function updateMetricOptions(){const names=[...new Set(filteredMetrics(true).map(x=>x.name))].sort((a,b)=>meta(a).label.localeCompare(meta(b).label)),old=q('#metric').value;q('#metric').innerHTML=names.map(x=>`<option value="${x}">${esc(meta(x).label)} · ${esc(meta(x).unit)}</option>`).join('');q('#metric').value=names.includes(old)?old:names.includes('accuracy')?'accuracy':names[0]||''}
-function renderWarning(){const split=q('#split').value;q('#split-warning').innerHTML=split==='apparent_same_data'?'<strong>Exploratory only:</strong> parameter selection and scoring reused data. Do not cite these values as classification accuracy.':split==='inner_validation'?'<strong>Optimization diagnostics:</strong> boundary rates and selection stability use inner folds only; they diagnose the search space and are not test accuracy.':split==='outer_test_perturbed'?'<strong>Robustness evidence:</strong> held-out trials were perturbed after training; compare against the matching unperturbed outer-test result.':'<strong>Primary evidence:</strong> each value comes from untouched outer-block trials after inner-fold parameter and ridge selection.'}
-function renderCards(){const rows=filteredMetrics(true),runIds=new Set(rows.map(x=>x.run_id)),acc=rows.filter(x=>x.name==='accuracy').map(x=>x.value),itr=rows.filter(x=>x.name==='practical_itr_bits_per_minute').map(x=>x.value);q('#cards').innerHTML=[['Evidence runs',runIds.size,'selected split'],['Median accuracy',acc.length?fmt(median(acc),'accuracy'):'–',`${acc.length} values`],['Best practical ITR',itr.length?fmt(Math.max(...itr),'practical_itr_bits_per_minute'):'–','bits/min including overhead']].map(x=>`<article class="card"><div class="value">${x[1]}</div><div class="label">${x[0]} · ${x[2]}</div></article>`).join('')}
+function renderWarning(){const split=q('#split').value;q('#split-warning').innerHTML=split==='apparent_same_data'?'<strong>Same-data score:</strong> parameter selection and scoring reused the same trials; use this only to inspect the parameter search.':split==='inner_validation'?'<strong>Inner-fold summary:</strong> boundary rates and selection stability describe the parameter search; they are not held-out accuracy.':split==='outer_test_perturbed'?'<strong>Perturbed held-out trials:</strong> compare this result with the matching unperturbed held-out result.':'<strong>Held-out result:</strong> outer-block trials were not used for parameter or ridge selection.'}
+function renderCards(){const rows=filteredMetrics(true),runIds=new Set(rows.map(x=>x.run_id)),acc=rows.filter(x=>x.name==='accuracy').map(x=>x.value),itr=rows.filter(x=>x.name==='practical_itr_bits_per_minute').map(x=>x.value);q('#cards').innerHTML=[['Runs',runIds.size,'selected split'],['Median accuracy',acc.length?fmt(median(acc),'accuracy'):'–',`${acc.length} values`],['Best practical ITR',itr.length?fmt(Math.max(...itr),'practical_itr_bits_per_minute'):'–','bits/min including overhead']].map(x=>`<article class="card"><div class="value">${x[1]}</div><div class="label">${x[0]} · ${x[2]}</div></article>`).join('')}
 function renderMetricChart(){const name=q('#metric').value,rows=filteredMetrics(),box=q('#metric-chart');if(!rows.length){box.innerHTML='<div class="empty">No values for this selection.</div>';return}const m=meta(name),values=rows.map(x=>x.value*m.scale),classes=rows.map(x=>Number(x.classes)).filter(Number.isFinite),useClasses=new Set(classes).size>1,xvals=rows.map((r,i)=>useClasses?Number(r.classes):(Number(r.subject)||i+1)),xmin=Math.min(...xvals),xmax=Math.max(...xvals),ymin=Math.min(0,...values),ymax=Math.max(...values),ys=ymax-ymin||1,xs=xmax-xmin||1,W=1000,H=330,L=78,R=22,T=22,B=55;let grid='';for(let i=0;i<=5;i++){const y=T+(H-T-B)*i/5,v=ymax-ys*i/5;grid+=`<line class="grid" x1="${L}" y1="${y}" x2="${W-R}" y2="${y}"/><text class="tick" x="${L-8}" y="${y+4}" text-anchor="end">${v.toFixed(Math.abs(v)>=100?0:2)}</text>`}const marks=rows.map((r,i)=>{const x=L+(W-L-R)*(xvals[i]-xmin)/xs+(rows.length>1?((Number(r.subject)||i)%7-3)*2:0),y=T+(H-T-B)*(ymax-values[i])/ys,mode=r.filter||'unspecified',suffix=m.unit==='%'?'':` ${m.unit}`;return`<circle class="mark-${mode}" cx="${x}" cy="${y}" r="5"><title>${esc(r.study)} · S${esc(r.subject)} · ${esc(r.classes)} classes · ${mode} · ${fmt(r.value,name)}${esc(suffix)}</title></circle>`}).join('');box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(m.label)} plot">${grid}<line class="axis" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/><line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>${marks}<text class="tick" x="${(L+W-R)/2}" y="${H-12}" text-anchor="middle">${useClasses?'Class count':'Subject'}</text><text class="tick" transform="translate(18 ${(T+H-B)/2}) rotate(-90)" text-anchor="middle">${esc(m.label)} (${esc(m.unit)})</text></svg>`}
 function renderMetricSummary(){const rows=filteredMetrics(true),names=[...new Set(rows.map(x=>x.name))].sort((a,b)=>meta(a).label.localeCompare(meta(b).label));q('#metric-summary').innerHTML=names.map(name=>{const vals=rows.filter(x=>x.name===name).map(x=>x.value),m=meta(name);return`<tr><td>${esc(m.label)}</td><td>${esc(m.unit)}</td><td class="num">${vals.length}</td><td class="num">${fmt(median(vals),name)}</td><td class="num">${fmt(Math.min(...vals),name)}</td><td class="num">${fmt(Math.max(...vals),name)}</td></tr>`}).join('')||'<tr><td colspan="6">No metrics.</td></tr>'}
 function progressPct(value){return Number.isFinite(value)?Math.max(0,Math.min(100,value*100)):null}
-function renderLiveProgress(){const rows=D.experiment_progress.filter(x=>x.active||(x.status==='running'&&x.planned&&x.checkpoints<x.planned)),box=q('#live-progress');if(!rows.length){box.innerHTML='<div class="empty">No active or resumable experiments.</div>';return}box.innerHTML=rows.map(x=>{const pct=progressPct(x.fraction),cell=Number.isFinite(x.cell_fraction)?progressPct(x.cell_fraction):null,state=x.active?'Running now':'Pending / resumable',stateClass=x.active?'live-state':'pending-state',cells=x.planned?`${x.completed_cells??x.checkpoints}/${x.planned} study cells`:`${x.checkpoints} checkpoints`,cellText=cell===null?'':` · current cell ${x.cell_current}/${x.cell_total} (${cell.toFixed(1)}%)`;return`<article class="live-row"><div class="live-head"><strong>${esc(x.name)}</strong><span class="${stateClass}">${state}</span></div><div class="progress-track" role="progressbar" aria-label="${esc(x.name)} study progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct??0}"><div class="progress-fill" style="width:${pct??0}%"></div></div><div class="progress-detail"><span><strong>${pct===null?'Progress unavailable':pct.toFixed(2)+'%'}</strong> · ${cells}${cellText}</span><span>${esc(x.phase||'idle')} · ${esc(x.message||'')}</span><span>updated ${new Date(x.updated_epoch*1000).toLocaleTimeString()}</span></div>${cell===null?'':`<div class="progress-track" role="progressbar" aria-label="${esc(x.name)} current cell progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${cell.toFixed(1)}"><div class="progress-fill" style="width:${cell}%"></div></div>`}</article>`}).join('')}
+function renderLiveProgress(){const rows=D.experiment_progress.filter(x=>x.active||(x.status==='running'&&x.planned&&x.checkpoints<x.planned)),box=q('#live-progress');if(!rows.length){box.innerHTML='<div class="empty">No experiment is running. Completed results are shown below.</div>';return}box.innerHTML=rows.map(x=>{const pct=progressPct(x.fraction),cell=Number.isFinite(x.cell_fraction)?progressPct(x.cell_fraction):null,state=x.active?'Running now':'Pending / resumable',stateClass=x.active?'live-state':'pending-state',cells=x.planned?`${x.completed_cells??x.checkpoints}/${x.planned} study cells`:`${x.checkpoints} checkpoints`,cellText=cell===null?'':` · current cell ${x.cell_current}/${x.cell_total} (${cell.toFixed(1)}%)`;return`<article class="live-row"><div class="live-head"><strong>${esc(x.name)}</strong><span class="${stateClass}">${state}</span></div><div class="progress-track" role="progressbar" aria-label="${esc(x.name)} study progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct??0}"><div class="progress-fill" style="width:${pct??0}%"></div></div><div class="progress-detail"><span><strong>${pct===null?'Progress unavailable':pct.toFixed(2)+'%'}</strong> · ${cells}${cellText}</span><span>${esc(x.phase||'idle')} · ${esc(x.message||'')}</span><span>updated ${new Date(x.updated_epoch*1000).toLocaleTimeString()}</span></div>${cell===null?'':`<div class="progress-track" role="progressbar" aria-label="${esc(x.name)} current cell progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${cell.toFixed(1)}"><div class="progress-fill" style="width:${cell}%"></div></div>`}</article>`}).join('')}
 function renderProgress(){q('#progress').innerHTML=D.experiment_progress.slice(0,10).map(x=>{const pct=Number.isFinite(x.fraction)?` · ${(100*x.fraction).toFixed(2)}%`:'',eta=Number.isFinite(x.eta_seconds)?x.eta_seconds<60?`${x.eta_seconds.toFixed(0)} s`:`${(x.eta_seconds/60).toFixed(1)} min`:'–';return`<tr><td>${esc(x.name)}</td><td class="num">${x.checkpoints}${x.planned?`/${x.planned}`:''}</td><td><span class="badge">${esc(x.phase||x.status||'idle')}${pct}</span><br><span class="note">${esc(x.message||'')}</span></td><td class="num">${eta}</td><td class="num">${x.size_mb.toFixed(2)} MB</td><td>${new Date(x.updated_epoch*1000).toLocaleString()}</td></tr>`}).join('')}
 const traceLabels={raw_uV:'Raw EEG',filtered_uV:'Band-pass filtered EEG',rf_u:'R&F u state',rf_v:'R&F v state',delta_change_uV:'Successive sample change',lif_membrane:'LIF membrane state'};
 function setExample(){const item=D.examples[Number(q('#example').value)||0];if(!item){q('#example-view').innerHTML='<div class="empty">No generated examples.</div>';q('#trace-chart').innerHTML='';return}const keys=Object.keys(item.traces||{}).filter(k=>traceLabels[k]);q('#trace').innerHTML=keys.map(k=>`<option value="${k}">${traceLabels[k]} · ${item.units[k]}</option>`).join('');renderTrace();q('#example-view').innerHTML=`<div class="image-frame"><a href="${item.image_url}" target="_blank"><img class="example-image" src="${item.image_url}" alt="Signal, neuron state, threshold and spikes for S${item.subject}, ${item.frequency_hz} Hz, ${item.electrode}, block ${item.block}"></a></div><div class="caption">Full-resolution PNG · ${(item.image_bytes/1048576).toFixed(2)} MB · ${item.sampling_rate_hz} samples/s · time in ms · EEG amplitudes in µV · band ${Math.max(.1,item.frequency_hz-item.filter_half_width_hz)}–${item.frequency_hz+item.filter_half_width_hz} Hz (order ${item.filter_order}). Click image for native resolution.</div>`}
@@ -289,6 +325,7 @@ function renderTrace(){const item=D.examples[Number(q('#example').value)||0],key
 q('#example').innerHTML=D.examples.map((x,i)=>`<option value="${i}">S${x.subject} · ${x.frequency_hz} Hz · ${x.electrode} · block ${x.block}</option>`).join('');q('#example').onchange=setExample;q('#trace').onchange=renderTrace;setExample();
 function renderRuns(){const term=q('#search').value.toLowerCase(),selectedMetrics=D.metrics.filter(m=>m.split===q('#split').value),splitRuns=new Set(selectedMetrics.map(m=>m.run_id)),metricByRun={};selectedMetrics.filter(m=>m.name==='accuracy'||m.name==='practical_itr_bits_per_minute').forEach(m=>{(metricByRun[m.run_id]??={})[m.name]=m.value});const rows=D.runs.filter(r=>splitRuns.has(r.id)&&baseMatch(r)&&(!term||`${r.run_key} ${r.encoder||''} ${r.study}`.toLowerCase().includes(term))),pages=Math.max(1,Math.ceil(rows.length/pageSize));page=Math.min(page,pages-1);q('#runs').innerHTML=rows.slice(page*pageSize,(page+1)*pageSize).map(r=>{const mm=metricByRun[r.id]||{};return`<tr><td>${esc(r.study)}</td><td>${esc(r.subject)}</td><td>${esc(r.classes)}</td><td>${esc(r.filter)}</td><td>${esc(r.encoder)}</td><td class="num">${fmt(mm.accuracy,'accuracy')}</td><td class="num">${fmt(mm.practical_itr_bits_per_minute,'practical_itr_bits_per_minute')}</td><td><span class="badge">${esc(r.status)}</span></td></tr>`}).join('');q('#page').textContent=`Page ${page+1}/${pages} · ${rows.length} runs`;q('#prev').disabled=page===0;q('#next').disabled=page>=pages-1}
 function renderFacets(){const rows=filteredMetrics(true),names=[...new Set(rows.map(x=>x.name))].sort((a,b)=>meta(a).label.localeCompare(meta(b).label));q('#metric-facets').innerHTML=names.map(name=>{const m=meta(name),suffix=m.unit==='%'?'':` ${m.unit}`,vals=rows.filter(x=>x.name===name).map(x=>x.value*m.scale),lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1,points=vals.map((v,i)=>`<circle cx="${16+268*(v-lo)/span}" cy="${22+(i%3-1)*4}" r="4" fill="var(--blue)" opacity=".75"><title>${v.toFixed(3)}${esc(suffix)}</title></circle>`).join('');return`<div class="facet"><h3>${esc(m.label)}</h3><div class="range">${fmt(lo/m.scale,name)} to ${fmt(hi/m.scale,name)}${esc(suffix)} · N=${vals.length}</div><svg viewBox="0 0 300 45" role="img" aria-label="${esc(m.label)} distribution"><line x1="16" y1="22" x2="284" y2="22" stroke="var(--line)"/>${points}</svg></div>`}).join('')||'<div class="empty">No metrics in this split.</div>'}
-function updateAll(){renderWarning();updateMetricOptions();renderLiveProgress();renderCards();renderFacets();renderMetricChart();renderMetricSummary();renderProgress();page=0;renderRuns()}
+function renderEncoderResults(){const rows=D.encoder_comparison_results,box=q('#encoder-results');if(!rows.length){box.innerHTML='<div class="empty">No encoder results are available yet.</div>';return}box.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Study</th><th>Encoder</th><th>Subject</th><th>Accuracy</th><th>Settings evaluated</th><th>Median selected parameters</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x.study)}</td><td>${esc(x.encoder)}</td><td class="num">${x.subject}</td><td class="num">${x.accuracy.toFixed(2)}%</td><td class="num">${x.candidates}</td><td>${esc(x.selected_summary.join(', '))}</td></tr>`).join('')}</tbody></table></div>`}
+function updateAll(){renderWarning();updateMetricOptions();renderLiveProgress();renderEncoderResults();renderCards();renderFacets();renderMetricChart();renderMetricSummary();renderProgress();page=0;renderRuns()}
 ['#study','#split','#subject','#classes','#filter'].forEach(s=>q(s).onchange=updateAll);q('#metric').onchange=renderMetricChart;q('#search').oninput=()=>{page=0;renderRuns()};q('#prev').onclick=()=>{page--;renderRuns()};q('#next').onclick=()=>{page++;renderRuns()};updateAll();
 </script></body></html>'''
